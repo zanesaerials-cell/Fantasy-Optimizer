@@ -1,7 +1,7 @@
 // Visit /api/diagnose to find out exactly what's wrong with your config.
 // Never prints cookie values — only lengths, shapes and pass/fail checks.
 
-import { normalizeCookies } from "../../lib/espn";
+import { normalizeCookies } from "../../lib/adapters/espn.js";
 
 const BASE = "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons";
 

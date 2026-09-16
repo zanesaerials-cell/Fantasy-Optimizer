@@ -1,151 +1,210 @@
-# Lineup — ESPN + Sleeper fantasy dashboard
+# Fantasy Optimizer
 
-Dark, mobile-first weekly dashboard for a private ESPN league and a Sleeper
-league side by side: lineup optimizer, suggested moves, waiver targets,
-standings.
+A command center for managing multiple fantasy football teams across ESPN
+and Sleeper. It tells you what needs attention, what to do about it, what
+it's worth, and why — so you don't have to open six league pages.
 
-## What changed in v2.1
+Mobile-first, dark, deployed on Vercel.
 
-**Fixed: ESPN 401 "rejected the login cookies".** This was a bug in v2, not
-an expired cookie. v2 wrapped `espn_s2` in `encodeURIComponent()` before
-sending it — but the value you copy from DevTools is *already*
-percent-encoded (`%2F`, `%2B`, `%3D`). Encoding it twice turns every `%`
-into `%25` and corrupts the cookie, which ESPN answers with a 401 that looks
-identical to an expiry. v1 didn't encode, which is why v1 worked with the
-same cookies. Now it doesn't encode, and it trims stray whitespace and adds
-missing SWID braces, since those are the two things that actually go wrong
-when pasting into Vercel.
+---
 
-**Added `/api/diagnose`.** Hit that URL on your deployment for a pass/fail
-list: which env vars are set, whether the cookie looks truncated or
-double-encoded, a live ESPN auth test, and the valid team IDs and manager
-names for your leagues. It never prints cookie values — only lengths and
-shape checks.
+## What v3 changed
 
-**Upgraded Next.js 14.2.5 → 16.3.5, React → 19.2.3.** The deploy warning
-came from a December 2025 advisory (CVE-2025-66478, CVE-2025-55184,
-CVE-2025-55183 and the follow-up CVE-2025-67779). Those are React Server
-Components bugs affecting the App Router and Server Actions — this app uses
-the Pages Router with neither, so real exposure was low, but the tree is now
-clean (`npm audit`: 0 vulnerabilities). Staying on 14.x wasn't a good option
-since that line is no longer supported.
+v2 was a two-league dashboard. v3 is a multi-league decision tool built on
+a platform-independent core.
 
-## What changed in v2
+**Architecture**
+- Platform adapter layer (`lib/adapters/`). ESPN and Sleeper are normalized
+  into one domain model before any product logic runs. Neither platform's
+  quirks leak upward.
+- Adapters return an explicit `unsupported` result rather than an empty
+  array when a platform can't do something, so the UI can say "not
+  available here" instead of looking broken.
+- Centralized sync (`lib/sync.js`). One call produces the complete dataset
+  for a league. No component fetches independently.
+- Two-tier cache (`lib/cache.js`) with per-data-type TTLs. In-process by
+  default; optionally backed by Upstash Redis with no added dependency.
+- 53 automated tests, including regression tests pinning all four
+  historical production bugs.
 
-**Two data bugs fixed.**
+**Product**
+- Command Center at `/` — every league, sorted by urgency
+- Deterministic severity rules (CRITICAL / HIGH / MEDIUM / LOW)
+- "Why?" on every recommendation, showing the actual inputs
+- Lineup optimizer handling any slot configuration
+- Bench points: what you scored vs. what the optimal lineup would have
+- Opponent scouting with position-by-position edges
+- Roster health scored against the league's own median
+- Waiver ranking by upgrade over your weakest player at that position
+- Trade analyzer and trade finder
+- League switcher, bottom nav on mobile, three-column layout on desktop
 
-*ESPN stats were blank or wrong* (Trevor Lawrence showing nothing despite a
-26.1-point week; JSN's numbers off). ESPN returns a stack of stat entries
-per player — season totals, each individual week, and projections, all in
-one unordered array. v1 did `stats.find(s => s.statSourceId === 0)`, which
-grabbed whichever entry came first, often an unplayed future week. It also
-never sent a `scoringPeriodId`, so ESPN defaulted to the current week. v2
-matches on all three identifying fields (`statSourceId`, `statSplitTypeId`,
-`scoringPeriodId`) and requests an explicit week. See `pickStat()` in
-`lib/espn.js`.
+---
 
-*Sleeper showed no points at all.* The `/rosters` endpoint returns player
-IDs only — no scoring. Points live on `/matchups/{week}` as a
-`players_points` map, which v1 never called. v2 fetches it, and also sums
-every prior week to build real season totals and averages.
+## Configuration
 
-**New:**
-- Dark Sleeper-style UI, built mobile-first (44px tap targets, safe-area
-  insets, sticky header, horizontal-scroll filter chips)
-- Position filter (QB / RB / WR / TE / FLEX / K / DEF) on lineup and waivers
-- Real lineup optimizer that reads your league's actual slot configuration
-  and fills the most restrictive slots first, so FLEX gets genuine leftovers
-- Waiver ranking by *upgrade over your weakest starter at that position*,
-  not raw points — a WR3 who beats your WR5 matters more than a QB2 you'll
-  never start
-- Optional sportsbook player props as market-implied projections
-- Standings tab, matchup scoreboard, injury flags
-
-## Setup
-
-Same env vars as before, plus one optional new one. In Vercel → Project
-Settings → Environment Variables:
+### Existing leagues (unchanged from v2)
 
 | Key | Value |
 |---|---|
 | `ESPN_S2` | your espn_s2 cookie |
 | `ESPN_SWID` | your SWID cookie, braces included |
-| `ESPN_LEAGUE_ID` | `2139594506` |
-| `ESPN_SEASON` | `2026` |
+| `ESPN_LEAGUE_ID` | e.g. `2139594506` |
+| `ESPN_SEASON` | e.g. `2026` |
 | `ESPN_TEAM_ID` | your numeric team ID |
-| `SLEEPER_LEAGUE_ID` | `1389719356375580672` |
+| `SLEEPER_LEAGUE_ID` | e.g. `1389719356375580672` |
 | `SLEEPER_USERNAME` | your Sleeper display name |
-| `ODDS_API_KEY` | *optional* — see below |
 
-If `ESPN_TEAM_ID` or `SLEEPER_USERNAME` are missing or wrong, the app now
-tells you and lists the valid values instead of silently showing nothing.
+Your existing setup keeps working — these become your default leagues.
 
-## If ESPN returns 401
+### Adding more leagues
 
-Visit `https://your-app.vercel.app/api/diagnose` first — it will usually
-name the problem outright. The common causes, in order of likelihood:
+Set `LEAGUES` to a single-line JSON array:
 
-1. **The value got mangled on paste.** Vercel's env var field can introduce
-   line breaks in a 300+ character string. Paste it as a single line. The
-   diagnose endpoint flags whitespace and truncation.
-2. **You copied the wrong thing.** In DevTools, copy the cookie's *Value*
-   column, not the whole row. A value under ~100 characters is truncated.
-3. **Cookies from different sessions.** `espn_s2` and `SWID` must come from
-   the same logged-in session. Grab both at once.
-4. **You set the env var but didn't redeploy.** Vercel only picks up env
-   changes on a new deployment — Deployments → ⋯ → Redeploy.
-5. **Actually expired.** Rare, and the cookie's listed expiry date is not a
-   reliable signal — logging out elsewhere invalidates it early. If
-   diagnose passes every shape check and still gets 401, re-copy both.
+```json
+[{"platform":"espn","leagueId":"998877","teamId":"5","name":"Work League"},
+ {"platform":"sleeper","leagueId":"112233445566778899","username":"zane"}]
+```
 
-## About the betting odds
+One `ESPN_S2`/`ESPN_SWID` pair covers every ESPN league you're in — the
+cookies are per-user, not per-league.
 
-Neither ESPN nor Sleeper publishes a trustworthy free projection. Sportsbook
-player props are priced with real money at stake, so they're usually a
-sharper estimate of expected production. The app pulls consensus prop lines
-(pass yards, rush yards, receptions, anytime TD) and converts them into
-fantasy points **using your league's own scoring settings** — so a 0.5-PPR
-league and a full-PPR league get different numbers from the same line.
+Malformed entries are reported on the dashboard rather than crashing the
+app. League IDs are validated as numeric strings, and the API only ever
+fetches leagues present in this config.
 
-Honest caveats:
+### Optional
 
-- This needs a key from [the-odds-api.com](https://the-odds-api.com).
-  Player-prop markets are **not on the free tier** — the free 500-credit
-  plan covers game lines only. Props need a paid plan (~$30/mo at time of
-  writing), and each event costs credits per market.
-- Because of that, odds are fetched **lazily and cached 30 minutes**, not on
-  every page load.
-- Anytime-TD probability is used as a stand-in for expected touchdowns and
-  is nudged up ~12% to account for multi-TD games. It's an approximation.
-- Implied probabilities include the book's vig, so they sum slightly above
-  100%. Fine for ranking players against each other; don't read them as
-  true probabilities.
-- Without the key, everything else works and the market numbers just don't
-  appear. The app falls back to ESPN's projections, then season averages.
+| Key | Effect if unset |
+|---|---|
+| `ODDS_API_KEY` | Market projections disabled; falls back to platform projections, then season averages |
+| `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` | Cache is in-process only (still works, just colder between deploys) |
 
-**This is a projection aid, not betting advice, and not "odds of winning."**
-It reads the market's estimate of a player's production — it doesn't predict
-your matchup.
+---
 
-## Adding to your phone home screen
+## How projections work
 
-Open the Vercel URL in Safari (iOS) or Chrome (Android) → Share → Add to
-Home Screen. The theme-color and status-bar meta tags are already set so it
-opens looking like a native app.
+Every projection carries its source, and the UI always shows which one
+produced the number. Sources are never averaged together, because a
+sportsbook line and a season average don't mean the same thing.
 
-## Ideas worth building next
+Hierarchy, best first:
 
-- **Write actions.** Right now everything is read-only, on purpose — it
-  tells you what to do, you do it. Sleeper has no public write API; ESPN
-  has an undocumented one that would let the app set lineups directly.
-  Higher risk (bad request = wrong lineup), so consider a confirm step.
-- **Bye-week and opponent-strength warnings.** Needs an NFL schedule
-  source; both platforms expose it awkwardly.
-- **Trade analyzer** comparing two rosters' projected points by position.
-- **Push alerts** when a starter's status flips to Out — a Vercel cron job
-  hitting `/api/report` and diffing against the last run.
-- **Season-long history charts** per player, now that weekly data parses
-  correctly.
+1. **Market consensus** — sportsbook player props converted to fantasy
+   points using your league's scoring. Requires `ODDS_API_KEY`. Player-prop
+   markets are not on The Odds API free tier.
+2. **Platform projection** — ESPN's own weekly projection.
+3. **Recent form** — the player's last three actual games.
+4. **Season average**.
+
+If none exist, the projection is `null` and the UI shows a dash. It never
+guesses.
+
+**Floor and ceiling** are the standard deviation of that player's *own*
+actual weekly scores this season. Fewer than three games played means no
+range is shown, rather than a fabricated one.
+
+**Confidence** is derived from measurable data quality: how many sources
+exist, whether they agree, how much history there is, and how volatile the
+player has been. It is not an opinion.
+
+**Win probability** is a Monte Carlo simulation over both rosters' weekly
+variance. If either roster lacks enough history, it returns `null` rather
+than an invented percentage.
+
+---
+
+## Risk preference
+
+`?preference=conservative|balanced|upside` changes which number the
+optimizer ranks by — floor-weighted, projection, or ceiling-weighted. It
+never alters the underlying statistics, only the weighting.
+
+---
+
+## API
+
+| Route | Purpose |
+|---|---|
+| `GET /api/dashboard` | All leagues, all recommendations, sorted by urgency |
+| `GET /api/leagues/:id` | One league in full (deep sync, includes history) |
+| `POST /api/trades/analyze` | Simulate a trade. Never submits anything |
+| `GET /api/health` | Platform reachability, cache stats, config status |
+| `GET /api/diagnose` | ESPN auth troubleshooting |
+| `GET /api/odds` | Market projections when configured |
+
+---
+
+## Security
+
+- ESPN cookies are read server-side only. They are never sent to the
+  browser, never placed in localStorage, never logged.
+- `lib/logger.js` scrubs known secret values and secret-looking keys from
+  every log line before serialization.
+- `/api/diagnose` reports only lengths and pass/fail checks, never values.
+- League IDs from the browser are validated against the server's configured
+  leagues before any upstream request, so the API can't be used as an open
+  ESPN/Sleeper proxy.
+- Trade endpoints bound input size and validate array shapes.
+- `.gitignore` covers `.env*` — **it was missing from the repo before v3**,
+  which meant a local `.env.local` could have been committed.
+
+---
+
+## Testing
+
+```bash
+npm test     # 53 tests
+```
+
+Regression tests in `test/regressions.test.js` pin four bugs that shipped
+to production. If one fails, a real user-visible bug has returned:
+
+1. **ESPN cookie double-encoding** — `espn_s2` arrives already
+   percent-encoded; encoding it again produced `%25` sequences and a 401
+   indistinguishable from an expired session.
+2. **ESPN stat selection** — `player.stats` is an unordered array mixing
+   season totals, every week, and projections. Matching only on
+   `statSourceId` returned whichever came first, often an unplayed future
+   week, so real scores rendered blank.
+3. **Sleeper matchup points** — `/rosters` carries no scoring at all;
+   points live on `/matchups/{week}`.
+4. **OUT starters inflating the current lineup** — found by smoke test
+   during v3 development. A player who cannot play must contribute zero,
+   or the "points available" figure is understated.
+
+Unit tests cover the optimizer (including the FLEX-steals-the-only-RB
+case), projection hierarchy and fallbacks, confidence derivation,
+cross-platform player identity matching, waiver ranking, bench points,
+trade math, and config validation.
+
+---
+
+## Known limitations
+
+Stated plainly, because the app never fabricates data:
+
+- **No target share, snap counts, or defense-vs-position rankings.** These
+  need a paid data provider. Recommendations use projections, variance,
+  injury status and roster context only.
+- **No schedule-strength outlook** for waiver targets, for the same reason.
+- **ESPN transactions are unavailable.** ESPN's endpoint is unreliable for
+  private leagues, so the adapter reports it as unsupported rather than
+  showing an empty list.
+- **"What changed since last visit" is not implemented.** It needs durable
+  snapshots; the Redis layer exists but the feature does not yet.
+- **Recommendation accuracy tracking is not implemented.** Same reason. It
+  requires storing recommendations and scoring them after the week
+  resolves.
+- **Player profiles, player comparison, settings UI, scenario mode,
+  dynasty features and the AI assistant are not implemented.**
+- **Win probability assumes independent, normally-distributed scores.**
+  Real scores correlate (shared game environments) and are right-skewed,
+  so treat it as a reasonable estimate rather than a precise number.
+- **Player identity matching across platforms is name+position based.** Two
+  players sharing a name and position at the same time would collide.
+
+---
 
 ## Local development
 
@@ -153,4 +212,14 @@ opens looking like a native app.
 cp .env.local.example .env.local   # fill in values
 npm install
 npm run dev
+npm test
+```
+
+## Deployment
+
+Push to GitHub; Vercel builds automatically. Environment variable changes
+require a redeploy to take effect.
+
+```bash
+npm run build   # verify before pushing
 ```

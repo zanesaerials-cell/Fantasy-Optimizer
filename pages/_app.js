@@ -12,7 +12,7 @@ export default function App({ Component, pageProps }) {
         <meta name="theme-color" content="#0b0e13" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-        <title>Lineup</title>
+        <title>Fantasy Optimizer</title>
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
         <link

@@ -5,7 +5,7 @@ import {
   buildPropIndex,
   propsToFantasyPoints,
   normalizeName,
-} from "../../lib/odds";
+} from "../../lib/odds.js";
 
 // Cached in module scope — props move slowly during the week and every
 // Odds API call costs credits, so don't refetch on every page view.
