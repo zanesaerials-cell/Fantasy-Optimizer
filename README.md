@@ -1,85 +1,112 @@
-# Fantasy Optimizer — ESPN + Sleeper Weekly Report
+# Lineup — ESPN + Sleeper fantasy dashboard
 
-A small Next.js app that pulls your rosters from both a private ESPN league
-and a Sleeper league, and shows lineup/waiver suggestions on one page.
-Deployed on Vercel, refreshed on demand (just reload the page each week).
+Dark, mobile-first weekly dashboard for a private ESPN league and a Sleeper
+league side by side: lineup optimizer, suggested moves, waiver targets,
+standings.
 
-## What it actually does (read this first)
+## What changed in v2
 
-- **ESPN**: pulls your roster, applies a simple heuristic (bench player with
-  higher season average than a starter at the same position → suggested
-  swap), flags injury statuses, and lists top-owned free agents.
-- **Sleeper**: pulls your roster/bench and cross-references Sleeper's
-  "trending adds" (most-added players league-wide in the last 24h) against
-  players unrostered in *your* league, as a waiver-wire signal.
-- Neither platform's public API gives true "win probability" or vetted
-  weekly projections, so this is directional, not a betting-odds tool. If
-  you want real projections later, the cleanest upgrade is plugging in a
-  projections API (e.g. FantasyPros) inside `lib/`.
+**Two data bugs fixed.**
 
-## 1. Get your ESPN cookies (one-time, per season)
+*ESPN stats were blank or wrong* (Trevor Lawrence showing nothing despite a
+26.1-point week; JSN's numbers off). ESPN returns a stack of stat entries
+per player — season totals, each individual week, and projections, all in
+one unordered array. v1 did `stats.find(s => s.statSourceId === 0)`, which
+grabbed whichever entry came first, often an unplayed future week. It also
+never sent a `scoringPeriodId`, so ESPN defaulted to the current week. v2
+matches on all three identifying fields (`statSourceId`, `statSplitTypeId`,
+`scoringPeriodId`) and requests an explicit week. See `pickStat()` in
+`lib/espn.js`.
 
-1. Log into fantasy.espn.com on a desktop browser, in your league.
-2. Open DevTools (F12) → Application (Chrome) or Storage (Firefox) → Cookies → `https://fantasy.espn.com`.
-3. Copy the values of:
-   - `espn_s2` (long string) AEB7OhYUyJ%2FiwidamBj01ZlS2Ddzg%2FQ7QV%2BgS3kOdTpkP9OydULwAmSS8TCgXCzF5wwG1Ma27oQi7hS%2BDdLRTg5F9iz9%2BV4P4cL4Qr4uHugnUUrF3sLtM3GXH4mrCGCA%2BNcs7GqG%2F%2B8HknaO2h6%2BRrz3b5bfJ4s6uZYwpgh14UO4ITe4t2naTV9t1K6B6683wOI70w0jbLjBFAEn%2BrdcacKWYVlWjn0duR38yLADscoOBDtJYVAjyI%2FklPPM%2Bvn4E3Nvw5DHdqJyjDJ%2F0xVo1jVIfplQDFvKh6AVzc%2FUuRyuqhpO%2BUL8UDS4pKvPeh1J4IB1s0rYyuJs3ySu4A0VzEyx
-   - `SWID` (looks like `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}`, keep the curly braces)
-{AB3BB2B4-2038-424F-9DC8-B4D586A2AA0B}
+*Sleeper showed no points at all.* The `/rosters` endpoint returns player
+IDs only — no scoring. Points live on `/matchups/{week}` as a
+`players_points` map, which v1 never called. v2 fetches it, and also sums
+every prior week to build real season totals and averages.
 
-4. Find your **ESPN_TEAM_ID**: go to your team page, look at the URL for `teamId=N`. 7
+**New:**
+- Dark Sleeper-style UI, built mobile-first (44px tap targets, safe-area
+  insets, sticky header, horizontal-scroll filter chips)
+- Position filter (QB / RB / WR / TE / FLEX / K / DEF) on lineup and waivers
+- Real lineup optimizer that reads your league's actual slot configuration
+  and fills the most restrictive slots first, so FLEX gets genuine leftovers
+- Waiver ranking by *upgrade over your weakest starter at that position*,
+  not raw points — a WR3 who beats your WR5 matters more than a QB2 you'll
+  never start
+- Optional sportsbook player props as market-implied projections
+- Standings tab, matchup scoreboard, injury flags
 
-These cookies typically last most of a season but can expire if you log out
-everywhere — if the app starts erroring, just repeat this step and update
-the Vercel env var.
+## Setup
 
-## 2. Find your Sleeper username
-
-Just your normal Sleeper display name/username — no login needed, Sleeper's
-API is public.
-
-## 3. Deploy
-
-```bash
-# from inside this folder
-git init
-git add .
-git commit -m "Initial commit"
-gh repo create fantasy-optimizer --private --source=. --push
-# or push manually to a GitHub repo you create in the UI
-```
-
-Then on [vercel.com](https://vercel.com):
-1. "Add New Project" → import the GitHub repo.
-2. Before deploying, add these Environment Variables (Project Settings → Environment Variables):
+Same env vars as before, plus one optional new one. In Vercel → Project
+Settings → Environment Variables:
 
 | Key | Value |
 |---|---|
-| `ESPN_S2` | your espn_s2 cookie value |
-| `ESPN_SWID` | your SWID cookie value (with braces) |
+| `ESPN_S2` | your espn_s2 cookie |
+| `ESPN_SWID` | your SWID cookie, braces included |
 | `ESPN_LEAGUE_ID` | `2139594506` |
 | `ESPN_SEASON` | `2026` |
-| `ESPN_TEAM_ID` | your team's numeric ID |
+| `ESPN_TEAM_ID` | your numeric team ID |
 | `SLEEPER_LEAGUE_ID` | `1389719356375580672` |
 | `SLEEPER_USERNAME` | your Sleeper display name |
+| `ODDS_API_KEY` | *optional* — see below |
 
-3. Deploy. Visit the given `*.vercel.app` URL any time to see the current report — reload before setting your lineup each week.
+If `ESPN_TEAM_ID` or `SLEEPER_USERNAME` are missing or wrong, the app now
+tells you and lists the valid values instead of silently showing nothing.
 
-## 4. Local dev (optional)
+## About the betting odds
+
+Neither ESPN nor Sleeper publishes a trustworthy free projection. Sportsbook
+player props are priced with real money at stake, so they're usually a
+sharper estimate of expected production. The app pulls consensus prop lines
+(pass yards, rush yards, receptions, anytime TD) and converts them into
+fantasy points **using your league's own scoring settings** — so a 0.5-PPR
+league and a full-PPR league get different numbers from the same line.
+
+Honest caveats:
+
+- This needs a key from [the-odds-api.com](https://the-odds-api.com).
+  Player-prop markets are **not on the free tier** — the free 500-credit
+  plan covers game lines only. Props need a paid plan (~$30/mo at time of
+  writing), and each event costs credits per market.
+- Because of that, odds are fetched **lazily and cached 30 minutes**, not on
+  every page load.
+- Anytime-TD probability is used as a stand-in for expected touchdowns and
+  is nudged up ~12% to account for multi-TD games. It's an approximation.
+- Implied probabilities include the book's vig, so they sum slightly above
+  100%. Fine for ranking players against each other; don't read them as
+  true probabilities.
+- Without the key, everything else works and the market numbers just don't
+  appear. The app falls back to ESPN's projections, then season averages.
+
+**This is a projection aid, not betting advice, and not "odds of winning."**
+It reads the market's estimate of a player's production — it doesn't predict
+your matchup.
+
+## Adding to your phone home screen
+
+Open the Vercel URL in Safari (iOS) or Chrome (Android) → Share → Add to
+Home Screen. The theme-color and status-bar meta tags are already set so it
+opens looking like a native app.
+
+## Ideas worth building next
+
+- **Write actions.** Right now everything is read-only, on purpose — it
+  tells you what to do, you do it. Sleeper has no public write API; ESPN
+  has an undocumented one that would let the app set lineups directly.
+  Higher risk (bad request = wrong lineup), so consider a confirm step.
+- **Bye-week and opponent-strength warnings.** Needs an NFL schedule
+  source; both platforms expose it awkwardly.
+- **Trade analyzer** comparing two rosters' projected points by position.
+- **Push alerts** when a starter's status flips to Out — a Vercel cron job
+  hitting `/api/report` and diffing against the last run.
+- **Season-long history charts** per player, now that weekly data parses
+  correctly.
+
+## Local development
 
 ```bash
-cp .env.local.example .env.local   # fill in the values
+cp .env.local.example .env.local   # fill in values
 npm install
 npm run dev
 ```
-
-## Notes / next steps you might want
-
-- The free-agent and trending-add endpoints are unofficial ESPN/Sleeper
-  behavior and can change without notice — if a section stops showing data,
-  that's the most likely cause.
-- To get an actual "should I start X or Y" answer with real projections,
-  swap in a stats provider in `lib/` and merge it into
-  `buildLineupRecommendations` in `pages/api/report.js`.
-- Nothing here writes lineups or makes waiver claims automatically — it's
-  read-only and just tells you what to do manually, on purpose (keeps your
-  cookies lower-risk and avoids accidental league drama).

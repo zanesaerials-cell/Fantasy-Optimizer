@@ -1,168 +1,368 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
+
+const POSITIONS = ["ALL", "QB", "RB", "WR", "TE", "FLEX", "K", "DEF"];
+const FLEX_SET = ["RB", "WR", "TE"];
 
 export default function Home() {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [platform, setPlatform] = useState("espn");
+  const [tab, setTab] = useState("lineup");
+  const [pos, setPos] = useState("ALL");
+  const [market, setMarket] = useState(null);
 
-  useEffect(() => {
+  const load = useCallback(() => {
+    setLoading(true);
     fetch("/api/report")
       .then((r) => r.json())
-      .then((d) => {
-        if (d.error) setError(d.error);
-        else setData(d);
-      })
+      .then((d) => (d.error ? setError(d.error) : setData(d)))
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, []);
 
+  useEffect(load, [load]);
+
+  const league = data?.[platform];
+
+  // Market projections are fetched lazily — each Odds API call costs credits.
+  useEffect(() => {
+    if (!league?.configured || !data?.oddsAvailable || market) return;
+    const names = collectNames(league);
+    if (!names.length) return;
+    const qs = new URLSearchParams({
+      players: names.join("|"),
+      scoring: JSON.stringify(league.scoring || {}),
+    });
+    fetch(`/api/odds?${qs}`)
+      .then((r) => r.json())
+      .then((d) => setMarket(d.projections || {}))
+      .catch(() => setMarket({}));
+  }, [league, data, market]);
+
+  const withMarket = useCallback(
+    (p) => (p?.name && market?.[p.name] ? { ...p, market: market[p.name] } : p),
+    [market]
+  );
+
   return (
-    <div style={styles.page}>
-      <h1 style={styles.h1}>Weekly Fantasy Report</h1>
+    <div className="shell">
+      <header className="topbar">
+        <div className="brandrow">
+          <span className="brand">
+            {league?.leagueName || "Lineup"}
+          </span>
+          {data && (
+            <span className="weekpill">
+              Week {data.week} · {data.season}
+            </span>
+          )}
+        </div>
+        <nav className="seg">
+          <button data-on={platform === "espn"} onClick={() => { setPlatform("espn"); setMarket(null); }}>
+            ESPN
+          </button>
+          <button data-on={platform === "sleeper"} onClick={() => { setPlatform("sleeper"); setMarket(null); }}>
+            Sleeper
+          </button>
+        </nav>
+        <nav className="seg">
+          {["lineup", "moves", "waivers", "league"].map((t) => (
+            <button key={t} data-on={tab === t} onClick={() => setTab(t)}>
+              {{ lineup: "Lineup", moves: "Moves", waivers: "Waivers", league: "League" }[t]}
+            </button>
+          ))}
+        </nav>
+      </header>
 
-      {loading && <p>Loading your leagues…</p>}
-      {error && <p style={styles.error}>Error: {error}</p>}
+      {loading && <Skeletons />}
+      {error && <p className="note bad">Couldn't load your leagues. {error}</p>}
 
-      {data && (
+      {!loading && league && !league.configured && (
+        <p className="note bad">{league.error}</p>
+      )}
+
+      {!loading && league?.needsTeamId && (
+        <div className="note">
+          Add <code>ESPN_TEAM_ID</code> in Vercel, then redeploy. Teams in this league:
+          <ul>
+            {league.teams.map((t) => (
+              <li key={t.teamId}>
+                <code>{t.teamId}</code> — {t.teamName}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {!loading && league?.needsUsername && (
+        <div className="note">
+          Add <code>SLEEPER_USERNAME</code> in Vercel. Managers: {league.teams.join(", ")}
+        </div>
+      )}
+
+      {!loading && league?.configured && league.myTeam && (
         <>
-          <Section title="ESPN — TexArkana Football League">
-            <EspnReport report={data.espn} />
-          </Section>
-          <Section title="Sleeper League">
-            <SleeperReport report={data.sleeper} />
-          </Section>
+          {tab === "lineup" && (
+            <LineupTab league={league} pos={pos} setPos={setPos} withMarket={withMarket} />
+          )}
+          {tab === "moves" && <MovesTab league={league} />}
+          {tab === "waivers" && (
+            <WaiversTab league={league} platform={platform} pos={pos} setPos={setPos} withMarket={withMarket} />
+          )}
+          {tab === "league" && <LeagueTab league={league} />}
         </>
+      )}
+
+      {!loading && (
+        <button className="btn ghost" style={{ marginTop: 20 }} onClick={load}>
+          Refresh data
+        </button>
       )}
     </div>
   );
 }
 
-function Section({ title, children }) {
-  return (
-    <div style={styles.section}>
-      <h2 style={styles.h2}>{title}</h2>
-      {children}
-    </div>
-  );
-}
+/* ---------------- tabs ---------------- */
 
-function EspnReport({ report }) {
-  if (!report?.configured) {
-    return <p style={styles.warn}>Not configured: {report?.reason}</p>;
-  }
-  if (!report.myTeam) {
-    return <p style={styles.warn}>Set ESPN_TEAM_ID in your env vars to identify your team. Teams in this league: {report.allTeams.map((t) => t.teamName).join(", ")}</p>;
-  }
+function LineupTab({ league, pos, setPos, withMarket }) {
+  const starters = league.myTeam.starters || league.myTeam.players?.filter((p) => p.isStarter) || [];
+  const bench = league.myTeam.players?.filter(
+    (p) => !starters.some((s) => s.playerId === p.playerId)
+  ) || [];
+
+  const shown = (list) => list.filter((p) => matchesPos(p, pos)).map(withMarket);
+  const optimalTotal = league.optimal?.projectedTotal ?? 0;
+  const currentTotal = league.myTeam.currentProjected ?? 0;
+  const delta = Number((optimalTotal - currentTotal).toFixed(1));
+
   return (
     <>
-      <h3 style={styles.h3}>{report.myTeam.teamName}</h3>
-      <PlayerTable players={report.myTeam.players} />
-
-      {report.lineupRecommendations.length > 0 && (
-        <>
-          <h4 style={styles.h4}>Suggested Moves</h4>
-          <ul>
-            {report.lineupRecommendations.map((r, i) => (
-              <li key={i} style={r.type === "injury_flag" ? styles.recWarn : styles.rec}>
-                {r.message}
-              </li>
-            ))}
-          </ul>
-        </>
+      {league.matchup && (
+        <div className="score">
+          <div className="side">
+            <div className="who">{league.myTeam.teamName || "My team"}</div>
+            <div className="num pts">{fmt(league.matchup.myScore)}</div>
+            <div className="proj">{currentTotal.toFixed(1)} projected</div>
+          </div>
+          <div className="vs">vs</div>
+          <div className="side right">
+            <div className="who">{league.matchup.oppName}</div>
+            <div className="num pts">{fmt(league.matchup.oppScore)}</div>
+          </div>
+        </div>
       )}
 
-      {report.topFreeAgents?.length > 0 && (
-        <>
-          <h4 style={styles.h4}>Top Available Free Agents</h4>
-          <ul>
-            {report.topFreeAgents.slice(0, 10).map((p, i) => (
-              <li key={i}>
-                {p.name} ({p.position}) — {p.percentOwned.toFixed(0)}% owned
-              </li>
-            ))}
-          </ul>
-        </>
+      <PosFilter pos={pos} setPos={setPos} />
+
+      <div className="h">Starting lineup</div>
+      <PlayerList players={shown(starters)} showSlot />
+
+      {delta > 0.5 && (
+        <div className="totals">
+          <span className="lbl">Optimal lineup would score</span>
+          <span className="num val up">+{delta.toFixed(1)}</span>
+        </div>
       )}
+
+      <div className="h">Bench</div>
+      <PlayerList players={shown(bench)} />
     </>
   );
 }
 
-function SleeperReport({ report }) {
-  if (!report?.configured) {
-    return <p style={styles.warn}>Not configured: {report?.reason}</p>;
-  }
-  if (!report.myRoster) {
+function MovesTab({ league }) {
+  const recs = league.recommendations || [];
+  if (!recs.length)
     return (
-      <p style={styles.warn}>
-        Set SLEEPER_USERNAME in your env vars to identify your team. Teams in this league:{" "}
-        {report.allRosters.map((r) => r.ownerName).join(", ")}
+      <p className="note">
+        Your lineup already matches the optimal one for this week. Check back after
+        injury reports drop on Friday.
       </p>
     );
-  }
   return (
     <>
-      <h3 style={styles.h3}>
-        {report.myRoster.ownerName} ({report.myRoster.record})
-      </h3>
-      <h4 style={styles.h4}>Starters</h4>
-      <PlayerTable players={report.myRoster.starters} sleeper />
-      <h4 style={styles.h4}>Bench</h4>
-      <PlayerTable players={report.myRoster.bench} sleeper />
+      <div className="h">{recs.length} suggested {recs.length === 1 ? "change" : "changes"}</div>
+      {recs.map((r, i) => (
+        <div className="rec" data-p={r.priority} key={i}>
+          <div className="body">
+            <div className="headline">{r.message}</div>
+            <div className="detail">{r.detail}</div>
+          </div>
+          {r.gain > 0 && <div className="num gain">+{r.gain.toFixed(1)}</div>}
+        </div>
+      ))}
+    </>
+  );
+}
 
-      {report.waiverSuggestions?.length > 0 && (
-        <>
-          <h4 style={styles.h4}>Trending Waiver Adds (unrostered in your league)</h4>
-          <ul>
-            {report.waiverSuggestions.map((p, i) => (
-              <li key={i}>
-                {p.name} ({p.position}, {p.team}) — added by {p.addCount24h} managers in last 24h
-              </li>
-            ))}
-          </ul>
-        </>
+function WaiversTab({ league, platform, pos, setPos, withMarket }) {
+  const raw = platform === "espn" ? league.freeAgents : league.waiverTargets;
+  const list = (raw || []).filter((p) => matchesPos(p, pos)).map(withMarket).slice(0, 40);
+
+  return (
+    <>
+      <PosFilter pos={pos} setPos={setPos} />
+      <div className="h">
+        Best available{pos !== "ALL" ? ` · ${pos}` : ""} — ranked by upgrade over your roster
+      </div>
+      {list.length ? (
+        <PlayerList players={list} showUpgrade />
+      ) : (
+        <p className="note">Nothing available at {pos} right now.</p>
       )}
     </>
   );
 }
 
-function PlayerTable({ players, sleeper }) {
-  if (!players?.length) return <p>—</p>;
+function LeagueTab({ league }) {
   return (
-    <table style={styles.table}>
-      <thead>
-        <tr>
-          <th style={styles.th}>Player</th>
-          <th style={styles.th}>Pos</th>
-          {!sleeper && <th style={styles.th}>Avg Pts</th>}
-          <th style={styles.th}>Status</th>
-        </tr>
-      </thead>
-      <tbody>
-        {players.map((p, i) => (
-          <tr key={i}>
-            <td style={styles.td}>{p.name}</td>
-            <td style={styles.td}>{p.position}</td>
-            {!sleeper && <td style={styles.td}>{p.avgPoints?.toFixed?.(1) ?? "-"}</td>}
-            <td style={styles.td}>{p.injuryStatus}</td>
-          </tr>
+    <>
+      <div className="h">Standings by points scored</div>
+      <div className="list">
+        {(league.standings || []).map((t, i) => (
+          <div className="row" key={i}>
+            <div className="slot num">{i + 1}</div>
+            <div className="pmain">
+              <div className="pname">{t.teamName}</div>
+              <div className="pmeta">{t.record}</div>
+            </div>
+            <div className="pstat">
+              <div className="num big">{fmt(t.pointsFor)}</div>
+              <div className="sub">points</div>
+            </div>
+          </div>
         ))}
-      </tbody>
-    </table>
+      </div>
+    </>
   );
 }
 
-const styles = {
-  page: { fontFamily: "system-ui, sans-serif", maxWidth: 800, margin: "0 auto", padding: 24 },
-  h1: { fontSize: 24, marginBottom: 16 },
-  h2: { fontSize: 20, borderBottom: "1px solid #ddd", paddingBottom: 6, marginTop: 32 },
-  h3: { fontSize: 17, marginTop: 16 },
-  h4: { fontSize: 15, marginTop: 20, color: "#444" },
-  section: { marginBottom: 32 },
-  warn: { color: "#b45309", background: "#fffbeb", padding: 12, borderRadius: 6 },
-  error: { color: "#b91c1c" },
-  rec: { color: "#065f46" },
-  recWarn: { color: "#b91c1c" },
-  table: { width: "100%", borderCollapse: "collapse", marginTop: 8, fontSize: 14 },
-  th: { textAlign: "left", borderBottom: "2px solid #eee", padding: "4px 8px" },
-  td: { borderBottom: "1px solid #f2f2f2", padding: "4px 8px" },
-};
+/* ---------------- pieces ---------------- */
+
+function PosFilter({ pos, setPos }) {
+  return (
+    <>
+      <div className="chips" role="tablist" aria-label="Filter by position">
+        {POSITIONS.map((p) => (
+          <button
+            key={p}
+            className="chip"
+            data-on={pos === p}
+            aria-pressed={pos === p}
+            onClick={() => setPos(p)}
+          >
+            {p === "ALL" ? "All" : p}
+          </button>
+        ))}
+      </div>
+      <select
+        className="select"
+        value={pos}
+        onChange={(e) => setPos(e.target.value)}
+        aria-label="Filter by position"
+        style={{ display: "none" }}
+      >
+        {POSITIONS.map((p) => (
+          <option key={p} value={p}>{p}</option>
+        ))}
+      </select>
+    </>
+  );
+}
+
+function PlayerList({ players, showSlot, showUpgrade }) {
+  if (!players?.length) return <p className="note">No players to show.</p>;
+  return (
+    <div className="list">
+      {players.map((p, i) => (
+        <PlayerRow key={p.playerId || i} p={p} showSlot={showSlot} showUpgrade={showUpgrade} />
+      ))}
+    </div>
+  );
+}
+
+function PlayerRow({ p, showSlot, showUpgrade }) {
+  const injured = isOut(p.injuryStatus);
+  const questionable = String(p.injuryStatus || "").toUpperCase() === "QUESTIONABLE";
+
+  // Priority: live market number, then platform projection, then season avg.
+  const primary =
+    p.market?.points ?? p.weekProjected ?? p.weekActual ?? p.seasonAvg ?? null;
+  const label = p.market
+    ? "market proj"
+    : p.weekProjected != null
+    ? "projected"
+    : p.weekActual != null
+    ? "this week"
+    : p.seasonAvg != null
+    ? "season avg"
+    : "no data";
+
+  return (
+    <div className="row">
+      {showSlot && <div className="slot">{p.lineupSlot || p.slot || ""}</div>}
+      <div className={`pos ${(p.position || "").replace("/", "")}`}>{p.position}</div>
+      <div className="pmain">
+        <div className="pname">{p.name}</div>
+        <div className="pmeta">
+          <span>{p.proTeam || "FA"}</span>
+          {injured && <span className="tag out">{p.injuryStatus}</span>}
+          {questionable && <span className="tag q">Q</span>}
+          {p.market && <span className="tag mkt">{p.market.tdProbability ?? "—"}% TD</span>}
+          {p.seasonTotal != null && <span>{fmt(p.seasonTotal)} season</span>}
+          {showUpgrade && p.upgrade != null && (
+            <span className={p.upgrade > 0 ? "up" : ""}>
+              {p.upgrade > 0 ? "+" : ""}{p.upgrade.toFixed(1)} vs your worst
+            </span>
+          )}
+        </div>
+      </div>
+      <div className="pstat">
+        <div className={`num big ${primary == null ? "nodata" : ""}`}>
+          {primary == null ? "—" : fmt(primary)}
+        </div>
+        <div className="sub">{label}</div>
+      </div>
+    </div>
+  );
+}
+
+function Skeletons() {
+  return (
+    <div>
+      {Array.from({ length: 7 }).map((_, i) => (
+        <div className="skel" key={i} />
+      ))}
+    </div>
+  );
+}
+
+/* ---------------- helpers ---------------- */
+
+function matchesPos(p, pos) {
+  if (pos === "ALL") return true;
+  if (pos === "FLEX") return FLEX_SET.includes(p.position);
+  return p.position === pos;
+}
+
+function isOut(s) {
+  return ["OUT", "IR", "DOUBTFUL", "SUSPENSION", "PUP", "NA"].includes(
+    String(s || "").toUpperCase()
+  );
+}
+
+function fmt(n) {
+  if (n == null) return "—";
+  return Number(n).toFixed(1);
+}
+
+function collectNames(league) {
+  const set = new Set();
+  const add = (arr) => (arr || []).forEach((p) => p?.name && set.add(p.name));
+  add(league.myTeam?.players);
+  add(league.myTeam?.starters);
+  add(league.freeAgents);
+  add(league.waiverTargets);
+  return [...set].slice(0, 300);
+}
