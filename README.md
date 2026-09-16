@@ -4,6 +4,32 @@ Dark, mobile-first weekly dashboard for a private ESPN league and a Sleeper
 league side by side: lineup optimizer, suggested moves, waiver targets,
 standings.
 
+## What changed in v2.1
+
+**Fixed: ESPN 401 "rejected the login cookies".** This was a bug in v2, not
+an expired cookie. v2 wrapped `espn_s2` in `encodeURIComponent()` before
+sending it — but the value you copy from DevTools is *already*
+percent-encoded (`%2F`, `%2B`, `%3D`). Encoding it twice turns every `%`
+into `%25` and corrupts the cookie, which ESPN answers with a 401 that looks
+identical to an expiry. v1 didn't encode, which is why v1 worked with the
+same cookies. Now it doesn't encode, and it trims stray whitespace and adds
+missing SWID braces, since those are the two things that actually go wrong
+when pasting into Vercel.
+
+**Added `/api/diagnose`.** Hit that URL on your deployment for a pass/fail
+list: which env vars are set, whether the cookie looks truncated or
+double-encoded, a live ESPN auth test, and the valid team IDs and manager
+names for your leagues. It never prints cookie values — only lengths and
+shape checks.
+
+**Upgraded Next.js 14.2.5 → 16.3.5, React → 19.2.3.** The deploy warning
+came from a December 2025 advisory (CVE-2025-66478, CVE-2025-55184,
+CVE-2025-55183 and the follow-up CVE-2025-67779). Those are React Server
+Components bugs affecting the App Router and Server Actions — this app uses
+the Pages Router with neither, so real exposure was low, but the tree is now
+clean (`npm audit`: 0 vulnerabilities). Staying on 14.x wasn't a good option
+since that line is no longer supported.
+
 ## What changed in v2
 
 **Two data bugs fixed.**
@@ -53,6 +79,24 @@ Settings → Environment Variables:
 
 If `ESPN_TEAM_ID` or `SLEEPER_USERNAME` are missing or wrong, the app now
 tells you and lists the valid values instead of silently showing nothing.
+
+## If ESPN returns 401
+
+Visit `https://your-app.vercel.app/api/diagnose` first — it will usually
+name the problem outright. The common causes, in order of likelihood:
+
+1. **The value got mangled on paste.** Vercel's env var field can introduce
+   line breaks in a 300+ character string. Paste it as a single line. The
+   diagnose endpoint flags whitespace and truncation.
+2. **You copied the wrong thing.** In DevTools, copy the cookie's *Value*
+   column, not the whole row. A value under ~100 characters is truncated.
+3. **Cookies from different sessions.** `espn_s2` and `SWID` must come from
+   the same logged-in session. Grab both at once.
+4. **You set the env var but didn't redeploy.** Vercel only picks up env
+   changes on a new deployment — Deployments → ⋯ → Redeploy.
+5. **Actually expired.** Rare, and the cookie's listed expiry date is not a
+   reliable signal — logging out elsewhere invalidates it early. If
+   diagnose passes every shape check and still gets 401, re-copy both.
 
 ## About the betting odds
 
