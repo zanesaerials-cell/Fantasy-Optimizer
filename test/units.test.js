@@ -465,3 +465,50 @@ test("waiverBuckets reports how many were considered vs how many cleared the bar
   assert.equal(buckets.meaningfulCount, 0);
   assert.equal(buckets.best.length, 0, "no marginal players should appear in 'best'");
 });
+
+/* ---------- regression: a single played week must not read as a confident average ---------- */
+/* Found via a real user report: a Sleeper bench player with one game on
+ * record (a 0) was showing as "projected 0.0" with no indication that was
+ * a sample of one. */
+
+test("one played game (Sleeper-style, no platform seasonAvg) yields no projection, not a false zero", () => {
+  const p = project({}, [0], null);
+  assert.equal(p.points, null, "a single data point is not an average");
+  assert.equal(p.source, SOURCE.NONE);
+});
+
+test("one played game with a nonzero score is equally insufficient", () => {
+  // Confirms this isn't specific to zero — any n=1 sample is too thin.
+  const p = project({}, [14], null);
+  assert.equal(p.points, null);
+});
+
+test("two played games are enough to report a value, via Recent Form since they're the same two games", () => {
+  const p = project({}, [0, 4], null);
+  assert.equal(p.points, 2);
+  assert.equal(p.source, SOURCE.RECENT, "with only 2 games, recent and season are identical — recent correctly wins");
+  assert.equal(p.sourceLabel, "Recent form (2 games)");
+});
+
+test("with 4+ games, season average draws on the full history while recent form uses only the last 3", () => {
+  const p = project({}, [0, 0, 0, 12], null); // last 3 = [0,0,12] avg 4; full season avg = 3
+  assert.equal(p.source, SOURCE.RECENT);
+  assert.equal(p.points, 4);
+});
+
+test("ESPN's own season average is trusted regardless of local history length", () => {
+  // ESPN supplies seasonAvg directly (its appliedAverage), already correct
+  // — this must not be gated by our locally-fetched history array, which
+  // may be empty on a shallow (non-deep) sync.
+  const p = project({ seasonAvg: 11.4 }, [], null);
+  assert.equal(p.points, 11.4);
+  assert.equal(p.source, SOURCE.SEASON);
+  assert.equal(p.sourceLabel, "Season average", "no game count appended for a platform-supplied number");
+});
+
+test("recent form still requires two games minimum, matching the season-average floor", () => {
+  const p = project({}, [0], null);
+  assert.equal(p.points, null);
+  const p2 = project({}, [0, 8], null);
+  assert.equal(p2.source, SOURCE.RECENT);
+});
