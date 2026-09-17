@@ -477,10 +477,27 @@ test("one played game (Sleeper-style, no platform seasonAvg) yields no projectio
   assert.equal(p.source, SOURCE.NONE);
 });
 
-test("one played game with a nonzero score is equally insufficient", () => {
-  // Confirms this isn't specific to zero — any n=1 sample is too thin.
+test("a nonzero single game is trusted — scoring points is unambiguous proof of playing", () => {
+  // This is the case my first fix broke: most of a roster has exactly one
+  // game logged early in the season, and nearly all of those scores are
+  // real, nonzero numbers. Requiring 2+ games for everyone collapsed the
+  // whole team's projections to null, not just the genuinely ambiguous case.
   const p = project({}, [14], null);
-  assert.equal(p.points, null);
+  assert.equal(p.points, 14);
+  assert.equal(p.source, SOURCE.SEASON);
+});
+
+test("a single zero remains ambiguous and is not reported as a real average", () => {
+  const p = project({}, [0], null);
+  assert.equal(p.points, null, "a lone zero could mean he played and scored nothing, or didn't play at all");
+  assert.equal(p.source, SOURCE.NONE);
+});
+
+test("an early-season roster of real one-game scores is not zeroed out", () => {
+  const scores = [22.4, 14.1, 9.8];
+  const results = scores.map((s) => project({}, [s], null));
+  assert.ok(results.every((r) => r.points != null), "real week-1 scores must survive");
+  assert.deepEqual(results.map((r) => r.points), scores);
 });
 
 test("two played games are enough to report a value, via Recent Form since they're the same two games", () => {
