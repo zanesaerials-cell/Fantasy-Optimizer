@@ -2,8 +2,10 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/router";
 import { Shell, Freshness, Empty, Skeleton } from "../../components/Shell";
 import RecommendationCard from "../../components/RecommendationCard";
+import { waiverBuckets } from "../../lib/analysis/index.js";
 
 const TABS = [
+  { key: "week", label: "This Week" },
   { key: "lineup", label: "Lineup" },
   { key: "moves", label: "Moves" },
   { key: "waivers", label: "Waivers" },
@@ -23,7 +25,7 @@ export default function LeaguePage() {
   const [busy, setBusy] = useState(false);
   const [pos, setPos] = useState("ALL");
 
-  const active = TABS.some((t) => t.key === tab) ? tab : "lineup";
+  const active = TABS.some((t) => t.key === tab) ? tab : "week";
 
   const load = useCallback((refresh = false) => {
     if (!id) return;
@@ -77,6 +79,7 @@ export default function LeaguePage() {
             ))}
           </div>
 
+          {active === "week" && <WeekTab data={data} onJump={setTab} />}
           {active === "lineup" && <LineupTab data={data} pos={pos} setPos={setPos} />}
           {active === "moves" && <MovesTab data={data} />}
           {active === "waivers" && <WaiversTab data={data} pos={pos} setPos={setPos} />}
@@ -85,6 +88,127 @@ export default function LeaguePage() {
         </>
       )}
     </Shell>
+  );
+}
+
+/**
+ * This Week — the weekly workflow from the spec. Every section reads data
+ * already fetched by the league sync; nothing here triggers a new request.
+ * Each section resolves to a pass/attention state so the whole review can
+ * be done from one screen.
+ */
+function WeekTab({ data, onJump }) {
+  const injuredStarters = data.lineup.current.starters.filter(
+    (p) => p.status === "OUT" || p.status === "IR" || p.status === "QUESTIONABLE" || p.status === "DOUBTFUL"
+  );
+  const emptySlots = data.lineup.problems.filter((p) => p.code === "EMPTY_SLOT");
+  const lineupGain = data.lineup.gain;
+  const meaningfulWaivers = data.waiverSupported ? waiverBuckets(data.waivers).meaningfulCount : 0;
+  const trades = data.trades || [];
+  const criticalCount = (data.recommendations || []).filter((r) => r.severity === "CRITICAL").length;
+
+  const sections = [
+    {
+      key: "lineup",
+      title: "Injuries",
+      ok: injuredStarters.length === 0 && emptySlots.length === 0,
+      detail: emptySlots.length > 0
+        ? `${emptySlots.length} starting slot${emptySlots.length === 1 ? " is" : "s are"} empty`
+        : injuredStarters.length === 0
+        ? "No injured starters"
+        : injuredStarters.map((p) => `${p.name} (${p.status})`).join(", "),
+    },
+    {
+      key: "lineup",
+      title: "Lineup",
+      ok: lineupGain <= 0.75,
+      detail: lineupGain > 0.75
+        ? `+${lineupGain} projected points available by optimizing`
+        : "Lineup is already optimal",
+    },
+    {
+      key: "waivers",
+      title: "Waivers",
+      ok: true, // informational — having zero opportunities is a fine outcome
+      detail: !data.waiverSupported
+        ? "Not available for this league"
+        : meaningfulWaivers > 0
+        ? `${meaningfulWaivers} meaningful opportunit${meaningfulWaivers === 1 ? "y" : "ies"}`
+        : "No meaningful upgrades on waivers right now",
+      neutral: !data.waiverSupported || meaningfulWaivers === 0,
+    },
+    {
+      key: "opponent",
+      title: "Matchup",
+      ok: true,
+      detail: data.scouting
+        ? `Projected ${data.scouting.myProjected} vs ${data.scouting.oppProjected}${data.scouting.winProbability != null ? ` · ${data.scouting.winProbability}% win probability` : ""}`
+        : "No matchup this week",
+      neutral: !data.scouting,
+    },
+    {
+      key: "league",
+      title: "Trades",
+      ok: true,
+      detail: trades.length > 0
+        ? `${trades.length} mutually beneficial trade${trades.length === 1 ? "" : "s"} found`
+        : "No obvious mutually beneficial trades right now",
+      neutral: trades.length === 0,
+    },
+  ];
+
+  const allClear = sections.every((s) => s.ok) && criticalCount === 0;
+
+  return (
+    <>
+      <div className="card" style={{ padding: 13, marginBottom: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ fontSize: 22, color: allClear ? "var(--accent)" : "var(--high)" }}>
+            {allClear ? "✓" : "!"}
+          </span>
+          <div>
+            <div style={{ fontWeight: 650, fontSize: 15 }}>
+              {allClear ? "You're set for this week" : "A few things need a look"}
+            </div>
+            <div className="pmeta">Week {data.week}</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="list">
+        {sections.map((s, i) => (
+          <button
+            key={i}
+            className="row"
+            style={{ width: "100%", textAlign: "left", cursor: "pointer" }}
+            onClick={() => onJump(s.key)}
+          >
+            <span
+              style={{
+                flex: "0 0 22px", fontSize: 15,
+                color: s.neutral ? "var(--dim)" : s.ok ? "var(--accent)" : "var(--high)",
+              }}
+            >
+              {s.neutral ? "·" : s.ok ? "✓" : "!"}
+            </span>
+            <span className="pmain">
+              <span className="pname">{s.title}</span>
+              <span className="pmeta">{s.detail}</span>
+            </span>
+            <span style={{ color: "var(--dim)", fontSize: 13 }}>→</span>
+          </button>
+        ))}
+      </div>
+
+      {criticalCount > 0 && (
+        <>
+          <div className="h">Critical — resolve before kickoff</div>
+          {data.recommendations.filter((r) => r.severity === "CRITICAL").map((r) => (
+            <RecommendationCard key={r.id} rec={r} showLeague={false} />
+          ))}
+        </>
+      )}
+    </>
   );
 }
 
@@ -113,7 +237,7 @@ function LineupTab({ data, pos, setPos }) {
           {lineup.gain > 0 && (
             <div style={{ marginLeft: "auto", textAlign: "right" }}>
               <div className="num" style={{ fontSize: 27, color: "var(--accent)" }}>+{lineup.gain}</div>
-              <div className="pmeta">Available</div>
+              <div className="pmeta">Potential gain</div>
             </div>
           )}
         </div>
@@ -163,13 +287,7 @@ function WaiversTab({ data, pos, setPos }) {
     );
   }
 
-  const buckets = {
-    best: data.waivers,
-    immediate: data.waivers.filter((p) => p.bestUse?.startsWith("Immediate")),
-    upside: [...data.waivers].sort((a, b) => (b.projection?.ceiling || 0) - (a.projection?.ceiling || 0)),
-    floor: [...data.waivers].sort((a, b) => (b.projection?.floor || 0) - (a.projection?.floor || 0)),
-  };
-
+  const buckets = waiverBuckets(data.waivers);
   const list = (buckets[bucket] || []).filter((p) => pos === "ALL" || p.position === pos).slice(0, 30);
 
   return (
@@ -192,9 +310,11 @@ function WaiversTab({ data, pos, setPos }) {
       {list.length === 0 ? (
         <div className="card">
           <Empty glyph="○">
-            {pos === "ALL"
-              ? "Your roster doesn't have an obvious upgrade available right now."
-              : `Nothing worth adding at ${pos}.`}
+            {pos !== "ALL"
+              ? `Nothing worth adding at ${pos} right now.`
+              : buckets.meaningfulCount === 0
+              ? `Your roster doesn't have an obvious upgrade available. ${buckets.consideredCount} free agents were checked against your weakest starter at each position — none cleared the bar.`
+              : "Nothing in this view right now — try Best available."}
           </Empty>
         </div>
       ) : (

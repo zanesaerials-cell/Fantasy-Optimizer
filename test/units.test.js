@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { optimize, analyzeLineup, validateLineup } from "../lib/optimizer.js";
 import { project, preferenceValue, SOURCE } from "../lib/projections.js";
 import { slotAccepts, normalizeStatus, normalizePosition, canonicalKey, STATUS } from "../lib/domain.js";
-import { rankWaiverTargets, benchPointsHistory, analyzeTrade, winProbability } from "../lib/analysis/index.js";
+import { rankWaiverTargets, benchPointsHistory, analyzeTrade, winProbability, waiverBuckets, MEANINGFUL_UPGRADE } from "../lib/analysis/index.js";
 import { loadLeagueConfigs } from "../lib/config.js";
 
 function P(name, position, points, extra = {}) {
@@ -380,4 +380,88 @@ test("win probability is a sane percentage when variance exists", () => {
     Math.abs(favoured + underdog - 100) < 6,
     `the two sides should roughly complement: ${favoured} + ${underdog}`
   );
+});
+
+/* ---------- optimizer: full slot-shape audit (spec phase-2 item 7) ---------- */
+
+test("standard 9-slot roster (QB/RB/RB/WR/WR/TE/FLEX/K/DEF) fills every slot correctly", () => {
+  const players = [
+    P("QB1", "QB", 22), P("RB1", "RB", 19), P("RB2", "RB", 15), P("RB3", "RB", 9),
+    P("WR1", "WR", 18), P("WR2", "WR", 14), P("WR3", "WR", 11),
+    P("TE1", "TE", 12), P("TE2", "TE", 6),
+    P("K1", "K", 8), P("DEF1", "DEF", 7),
+  ];
+  const slots = ["QB", "RB", "RB", "WR", "WR", "TE", "FLEX", "K", "DEF"];
+  const { lineup, bench } = optimize(players, slots);
+
+  assert.ok(lineup.every((a) => a.player), "every slot filled");
+  assert.equal(lineup.find((a) => a.slot === "K").player.name, "K1");
+  assert.equal(lineup.find((a) => a.slot === "DEF").player.name, "DEF1");
+  // FLEX should take the best remaining RB/WR/TE after dedicated slots are full:
+  // RB3(9) WR3(11) TE2(6) remain — WR3 is the best of those.
+  assert.equal(lineup.find((a) => a.slot === "FLEX").player.name, "WR3");
+  assert.equal(bench.length, 2, "TE2 and RB3 ride the bench");
+});
+
+test("a player with zero projection data is never preferred but doesn't crash the optimizer", () => {
+  const noData = { ...P("No Data Guy", "RB", 0), projection: { points: null, floor: null, ceiling: null, confidence: { level: "UNAVAILABLE", score: null, reasons: [] } } };
+  const players = [noData, P("Known RB", "RB", 9)];
+  const { lineup } = optimize(players, ["RB", "RB"]);
+  assert.equal(lineup.find((a) => a.player?.name === "Known RB")?.player.name, "Known RB");
+  assert.ok(lineup.every((a) => a.player), "the undated player still fills the second slot rather than being skipped");
+});
+
+test("WR/RB/TE flex (multiple, mixed with SUPERFLEX) resolves without stealing dedicated slots", () => {
+  const players = [
+    P("QB1", "QB", 24), P("QB2", "QB", 18),
+    P("RB1", "RB", 20), P("RB2", "RB", 16),
+    P("WR1", "WR", 19), P("WR2", "WR", 13), P("WR3", "WR", 10),
+    P("TE1", "TE", 11),
+  ];
+  const slots = ["QB", "RB", "WR", "WR", "FLEX", "SUPER_FLEX"];
+  const { lineup } = optimize(players, slots);
+  assert.equal(lineup.find((a) => a.slot === "QB").player.name, "QB1");
+  // SUPERFLEX should take QB2 (18) over any RB/WR/TE leftover, since it's the highest value left.
+  assert.equal(lineup.find((a) => a.slot === "SUPER_FLEX").player.name, "QB2");
+});
+
+/* ---------- confidence must never be fabricated from nothing ---------- */
+
+test("zero projection sources yields UNAVAILABLE confidence, not a fake low score", () => {
+  const p = project({}, [], null);
+  assert.equal(p.points, null);
+  assert.equal(p.confidence.level, "UNAVAILABLE");
+  assert.equal(p.confidence.score, null, "no numeric score should be invented");
+});
+
+test("real data still produces a numeric, graded confidence", () => {
+  const p = project({ seasonAvg: 10, weekProjected: 11 }, [8, 9, 10, 11], null);
+  assert.ok(typeof p.confidence.score === "number");
+  assert.ok(["HIGH", "MEDIUM", "LOW"].includes(p.confidence.level));
+});
+
+/* ---------- waivers: meaningful-upgrade gate ---------- */
+
+test("marginal free agents are excluded from the meaningful set", () => {
+  const myRoster = [P("My WR", "WR", 12)];
+  const ranked = rankWaiverTargets({
+    candidates: [P("Barely Better", "WR", 12.8), P("Real Upgrade", "WR", 19)],
+    myRoster, slots: ["WR", "FLEX"],
+  });
+  const barely = ranked.find((r) => r.name === "Barely Better");
+  const real = ranked.find((r) => r.name === "Real Upgrade");
+  assert.equal(barely.meaningful, false, `0.8 pt bump is noise, not a decision (threshold ${MEANINGFUL_UPGRADE})`);
+  assert.equal(real.meaningful, true);
+});
+
+test("waiverBuckets reports how many were considered vs how many cleared the bar", () => {
+  const myRoster = [P("My RB", "RB", 15)];
+  const ranked = rankWaiverTargets({
+    candidates: [P("Scrub1", "RB", 15.2), P("Scrub2", "RB", 14.9)],
+    myRoster, slots: ["RB"],
+  });
+  const buckets = waiverBuckets(ranked);
+  assert.equal(buckets.consideredCount, 2);
+  assert.equal(buckets.meaningfulCount, 0);
+  assert.equal(buckets.best.length, 0, "no marginal players should appear in 'best'");
 });

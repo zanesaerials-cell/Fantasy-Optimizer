@@ -43,8 +43,9 @@ export default function RecommendationCard({ rec, showLeague = true }) {
           )}
           {rec.confidence && (
             <span className="conf">
-              Confidence: {rec.confidence.level.toLowerCase()}
-              {rec.confidence.score != null ? ` (${rec.confidence.score}%)` : ""}
+              Confidence: {rec.confidence.level === "UNAVAILABLE"
+                ? "unavailable"
+                : `${rec.confidence.level.toLowerCase()}${rec.confidence.score != null ? ` (${rec.confidence.score}%)` : ""}`}
             </span>
           )}
         </div>
